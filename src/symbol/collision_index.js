@@ -84,95 +84,7 @@ class CollisionIndex {
         };
     }
 
-    clipLine(start: Point, end: Point, minBoundary: Point, maxBoundary: Point) {
-        const LEFT   = 1 << 0;
-        const RIGHT  = 1 << 1;
-        const BOTTOM = 1 << 2;
-        const TOP    = 1 << 3;
-
-        const epsilon = 0.00001;
-
-        // Compute region codes for both points
-        const computeRegion = (point, min, max) => {
-            let region = 0;
-
-            region |= LEFT * (point.x < min.x);
-            region |= RIGHT * (point.x > max.x);
-            region |= TOP * (point.y < min.y);      // top left of the screen is (0, 0)
-            region |= BOTTOM *(point.y > max.y);
-
-            return region;
-        };
-
-        const startRegion = computeRegion(start, minBoundary, maxBoundary);
-        const endRegion = computeRegion(end, minBoundary, maxBoundary);
-
-        // Both inside boundaries already?
-        if (!startRegion && !endRegion)
-            return [start, end];
-
-        // Both point outside of the region and inside a same region?
-        if (startRegion === endRegion)
-            return null;
-
-        // Perform segment-"aabb slab" intersection test to find precise intersection points
-        let tMin = 0.0;
-        let tMax = Number.MAX_VALUE;
-
-        const startToEnd = end.sub(start);
-        const len = startToEnd.mag();
-
-        if (len < epsilon)
-            return [start, end];
-
-        const dir = startToEnd.div(len);
-
-        const slabCheckOnAxis = (dirVec, minVec, maxVec, startVec) => {
-            if (Math.abs(dirVec) < epsilon) {
-                // Ray is parallel to the slab
-                if (startVec < minVec || startVec > maxVec) {
-                    return false;
-                }
-            } else {
-                const ood = 1.0 / dirVec;
-
-                let t1 = (minVec - startVec) * ood;
-                let t2 = (maxVec - startVec) * ood;
-
-                if (t1 > t2) {
-                    const temp = t1;
-                    t1 = t2;
-                    t2 = temp;
-                }
-
-                // Compute intersection
-                if (t1 > tMin) tMin = t1;
-                if (t2 < tMax) tMax = t2;
-
-                if (tMin > tMax || tMax < 0)
-                    return false;
-            }
-
-            return true;
-        }
-
-        // Perform slab check on both x and y axes
-        if (!slabCheckOnAxis(dir.x, minBoundary.x, maxBoundary.x, start.x))
-            return null;
-
-        if (!slabCheckOnAxis(dir.y, minBoundary.y, maxBoundary.y, start.y))
-            return null;
-
-        tMin = Math.min(tMin, len);
-        tMax = Math.min(tMax, len);
-
-        return [start.add(startToEnd.mult(tMin / len)), start.add(startToEnd.mult(tMax / len))];
-    }
-
-    placeCollisionCircles(collisionCircles: Array<number>,
-                          allowOverlap: boolean,
-                          scale: number,
-                          textPixelRatio: number,
+    placeCollisionCircles(allowOverlap: boolean,
                           symbol: any,
                           lineVertexArray: SymbolLineVertexArray,
                           glyphOffsetArray: GlyphOffsetArray,
@@ -183,16 +95,13 @@ class CollisionIndex {
                           showCollisionCircles: boolean,
                           pitchWithMap: boolean,
                           collisionGroupPredicate?: any,
-                          ppp: number,
-                          lineHeight): { circles: Array<number>, offscreen: boolean, collisionDetected: boolean } {
+                          circlePixelDiameter: number,
+                          textPixelPadding: number): { circles: Array<number>, offscreen: boolean, collisionDetected: boolean } {
         const placedCollisionCircles = [];
 
         const perspectiveRatio = this.projectAnchor(posMatrix, symbol.anchorX, symbol.anchorY, pitchWithMap).perspectiveRatio;
         const labelPlaneFontSize = pitchWithMap ? fontSize / perspectiveRatio : fontSize * perspectiveRatio;
-        const screenFontSize = fontSize * perspectiveRatio;
-
         const labelPlaneFontScale = labelPlaneFontSize / 24;
-        const screenFontScale = screenFontSize / 24;
 
         const tileUnitAnchorPoint = new Point(symbol.anchorX, symbol.anchorY);
         // projection.project generates NDC coordinates, as opposed to the
@@ -223,19 +132,9 @@ class CollisionIndex {
         let entirelyOffscreen = true;
 
         if (firstAndLastGlyph) {
-            const circles = [];
-
-            const addCircle = (point, radius) => {
-                circles.push({ point, radius });
-                return circles.length - 1;
-            };
-
-            const radius = (lineHeight * screenFontScale + 2 * ppp) / 2;
-
-            let lastPlacedCircle = null;
-
-            const labelPlaneMin = new Point(-viewportPadding, -viewportPadding);
-            const labelPlaneMax = new Point(this.screenRightBoundary, this.screenBottomBoundary);
+            const radius = circlePixelDiameter * 0.5 * perspectiveRatio + textPixelPadding;
+            const screenPlaneMin = new Point(-viewportPadding, -viewportPadding);
+            const screenPlaneMax = new Point(this.screenRightBoundary, this.screenBottomBoundary);
 
             // Construct projected path from projected line vertices. Anchor points are ignored and removed
             const first = firstAndLastGlyph.first;
@@ -243,72 +142,122 @@ class CollisionIndex {
 
             let projectedPath = first.path.slice(1).reverse().concat(last.path.slice(1));
 
-            // Convert to screen space?
+            // The path might need to be converted into screen space if pitched map is used as the label space
             if (labelToScreenMatrix) {
-                projectedPath = projectedPath.map(p => projection.project(p, labelToScreenMatrix).point);
+                const screenSpacePath = projectedPath.map(p => projection.project(p, labelToScreenMatrix));
+
+                // Do not try to place collision circles if even of the points is behind the camera.
+                // This is a plausible scenario with big camera pitch angles
+                if (screenSpacePath.some(point => point.signedDistanceFromCamera <= 0))
+                    projectedPath = []
+                else
+                    projectedPath = screenSpacePath.map(p => p.point);
             }
 
-            for (let segIdx = 0; segIdx < projectedPath.length - 1; segIdx++) {
-                const startIdx = segIdx;
-                const endIdx = segIdx + 1;
+            const segments = [];
 
-                const clippedLine = this.clipLine(projectedPath[startIdx], projectedPath[endIdx], labelPlaneMin, labelPlaneMax);
+            if (projectedPath.length > 0) {
+                // Quickly check if the path is fully inside or outside of the padded collision region.
+                // For overlapping paths we'll only create collision circles for visible segments
+                let minPoint = projectedPath[0].clone();
+                let maxPoint = projectedPath[1].clone();
 
-                if (!clippedLine)
-                    // This segment is not visible on the screen
-                    continue;
-
-                const startPoint = clippedLine[0];
-                const endPoint = clippedLine[1];
-                const dstStartIdx = circles.length;
-
-                // Always place collision circles on first and last points of the segment unless the path is continuous.
-                // Clipping against label plane boundaries might cause discontinuouties that must be taken into account
-                if (!lastPlacedCircle || lastPlacedCircle.dist(startPoint) >= 2.0 * radius) {
-                    addCircle(startPoint, radius);
+                for (let i = 1; i < projectedPath.length; i++) {
+                    minPoint.x = Math.min(minPoint.x, projectedPath[i].x);
+                    minPoint.y = Math.min(minPoint.y, projectedPath[i].y);
+                    maxPoint.x = Math.max(maxPoint.x, projectedPath[i].x);
+                    maxPoint.y = Math.max(maxPoint.y, projectedPath[i].y);
                 }
 
-                addCircle(endPoint, radius);
-                lastPlacedCircle = endPoint;
+                const region = computeRectClipRegion(minPoint, maxPoint, screenPlaneMin, screenPlaneMax);
 
-                const startToEnd = endPoint.sub(startPoint);
-                const segLen = startToEnd.mag();
-                const circlesInSegment = Math.ceil(segLen / (2.0 * radius)) - 1;
-                const circleToCircle = startToEnd.div(circlesInSegment + 1);
+                // 0 == fully visible, -1 == partly visible, > 1 not visble at all
+                if (region === 0) {
+                    segments.push(projectedPath);
+                } else if (region < 0) {
+                    // Split the path into visible and continuous segments
+                    let segment = [];
 
-                for (let i = 1; i <= circlesInSegment; i++) {
-                    addCircle(startPoint.add(circleToCircle.mult(i)), radius);
+                    for (let i = 0; i < projectedPath.length - 1; i++) {
+                        const line = clipLine(projectedPath[i], projectedPath[i+1], screenPlaneMin, screenPlaneMax);
+                        if (!line)
+                            continue;
+                        
+                        if (!segment.length) {
+                            segment.push(line[0]);
+                            segment.push(line[1]);
+                        } else if (segment[segment.length - 1] !== line[0]) {
+                            // Close prev segment and start a new one?
+                            segments.push(segment);
+                            segment = line;
+                        } else {
+                            segment.push(line[1]);
+                        }
+                    }
+
+                    if (segment.length)
+                        segments.push(segment);
+                }
+            }
+
+            for (const seg of segments) {
+                const distToPoints = [0.0];
+
+                // Compute cumulative distance from first point to each other point in the segment.
+                // Last entry in the array is total length of the path
+                for (let i = 1; i < seg.length; i++) {
+                    distToPoints[i] = distToPoints[i - 1] + seg[i].dist(seg[i - 1]);
                 }
 
-                // Convert circles of this segment into collision circles and perform collision checks
-                for (let cIdx = dstStartIdx; cIdx < circles.length; cIdx++) {
-                    const circle = circles[cIdx];
+                // interpolate positions for collision circles. Only one circle is placed if the segment is short enough.
+                let segLength = distToPoints[distToPoints.length - 1];
 
-                    const px = circle.point.x + viewportPadding;
-                    const py = circle.point.y + viewportPadding;
+                // Apply small padding to both ends of the segment. Length cannot be negative
+                const padding = Math.min(segLength * 0.5, radius * 0.5);
+                segLength -= padding * 2.0;
+
+                const circleDist = radius * 2.25;
+                const numCircles = segLength <= circleDist * 0.5 ? 1 : Math.ceil(segLength / circleDist) + 1;
+
+                let idxOfNextSegPoint = 1;
+                let distOfNextSegPoint = distToPoints[idxOfNextSegPoint];
+
+                for (let i = 0; i < numCircles; i++) {
+                    const distOfPoint = i / (Math.max(numCircles - 1, 1)) * segLength + padding;
+
+                    while (distOfNextSegPoint < distOfPoint && idxOfNextSegPoint < distToPoints.length) {
+                        distOfNextSegPoint = distToPoints[++idxOfNextSegPoint];
+                    }
+
+                    const idxOfPrevSegPoint = idxOfNextSegPoint - 1;
+                    const t = (distOfPoint - distToPoints[idxOfPrevSegPoint]) / (distOfNextSegPoint - distToPoints[idxOfPrevSegPoint]);
+                    const circlePosition = seg[idxOfPrevSegPoint].mult(1.0 - t).add(seg[idxOfNextSegPoint].mult(t));
+
+                    // add viewport padding to the position and perform initial collision check
+                    const centerX = circlePosition.x + viewportPadding;
+                    const centerY = circlePosition.y + viewportPadding;
     
-                    placedCollisionCircles.push(px, py, circle.radius, 0);
+                    placedCollisionCircles.push(centerX, centerY, radius, 0);
     
-                    const x1 = px - circle.radius;
-                    const y1 = py - circle.radius;
-                    const x2 = px + circle.radius;
-                    const y2 = py + circle.radius;
+                    const x1 = centerX - radius;
+                    const y1 = centerY - radius;
+                    const x2 = centerX + radius;
+                    const y2 = centerY + radius;
     
                     entirelyOffscreen = entirelyOffscreen && this.isOffscreen(x1, y1, x2, y2);
                     inGrid = inGrid || this.isInsideGrid(x1, y1, x2, y2);
     
                     if (!allowOverlap) {
-                        if (this.grid.hitTestCircle(px, py, circle.radius, collisionGroupPredicate)) {
+                        if (this.grid.hitTestCircle(centerX, centerY, radius, collisionGroupPredicate)) {
+                            // Don't early exit if we're showing the debug circles because we still want to calculate
+                            // which circles are in use
+                            collisionDetected = true;
                             if (!showCollisionCircles) {
                                 return {
                                     circles: [],
                                     offscreen: false,
                                     collisionDetected
                                 };
-                            } else {
-                                // Don't early exit if we're showing the debug circles because we still want to calculate
-                                // which circles are in use
-                                collisionDetected = true;
                             }
                         }
                     }
@@ -406,7 +355,7 @@ class CollisionIndex {
         }
     }
 
-    projectAnchor(posMatrix: mat4, x: number, y: number, pitchWithMap: boolean) {
+    projectAnchor(posMatrix: mat4, x: number, y: number) {
         const p = [x, y, 0, 1];
         projection.xyTransformMat4(p, p, posMatrix);
         return {
@@ -460,8 +409,118 @@ class CollisionIndex {
     }
 }
 
-// function markCollisionCircleUsed(collisionCircles: Array<number>, index: number, used: boolean) {
-//     collisionCircles[index + 4] = used ? 1 : 0;
-// }
+/*
+* Computes a region code for a point in a rectangular area using Cohen–Sutherland clipping algorithm
+*/
+function computePointClipRegion(point: Point, minBoundary: Point, maxBoundary: Point) {
+    const LEFT   = 1 << 0;
+    const RIGHT  = 1 << 1;
+    const BOTTOM = 1 << 2;
+    const TOP    = 1 << 3;
+
+    const min = minBoundary;
+    const max = maxBoundary;
+    let region = 0;
+
+    region |= LEFT * (point.x < min.x);
+    region |= RIGHT * (point.x > max.x);
+    region |= TOP * (point.y < min.y);      // top left of the screen is (0, 0)
+    region |= BOTTOM *(point.y > max.y);
+
+    return region;
+}
+
+/*
+* Computes a region code for a rect in a rectangular area using Cohen–Sutherland clipping algorithm.
+* Returns a negative value if the rect is overlapping with multiple regions
+*/
+function computeRectClipRegion(minPoint: Point, maxPoint: Point, minBoundary: Point, maxBoundary: Point) {
+    const p0 = new Point(minPoint.x, minPoint.y);
+    const p1 = new Point(minPoint.x, maxPoint.y);
+    const p2 = new Point(maxPoint.x, maxPoint.y);
+    const p3 = new Point(maxPoint.x, minPoint.y);
+
+    let region = computePointClipRegion(p0, minBoundary, maxBoundary);
+    if (region !== computePointClipRegion(p1, minBoundary, maxBoundary))
+        return -1;
+    else if (region !== computePointClipRegion(p2, minBoundary, maxBoundary))
+        return -1;
+    else if (region !== computePointClipRegion(p3, minBoundary, maxBoundary))
+        return -1;
+
+    return region;
+}
+
+function clipLine(start: Point, end: Point, minBoundary: Point, maxBoundary: Point) {
+    
+    const epsilon = 0.00001;
+
+    const startRegion = computePointClipRegion(start, minBoundary, maxBoundary);
+    const endRegion = computePointClipRegion(end, minBoundary, maxBoundary);
+
+    // Both inside boundaries already?
+    if (!startRegion && !endRegion)
+        return [start, end];
+
+    // Both point outside of the region and inside a same region?
+    if (startRegion === endRegion)
+        return null;
+
+    // Perform segment-"aabb slab" intersection test to find precise intersection points
+    let tMin = 0.0;
+    let tMax = Number.MAX_VALUE;
+
+    const startToEnd = end.sub(start);
+    const len = startToEnd.mag();
+
+    if (len < epsilon)
+        return [start, end];
+
+    const dir = startToEnd.div(len);
+
+    const slabCheckOnAxis = (dirVec, minVec, maxVec, startVec) => {
+        if (Math.abs(dirVec) < epsilon) {
+            // Ray is parallel to the slab
+            if (startVec < minVec || startVec > maxVec) {
+                return false;
+            }
+        } else {
+            const ood = 1.0 / dirVec;
+
+            let t1 = (minVec - startVec) * ood;
+            let t2 = (maxVec - startVec) * ood;
+
+            if (t1 > t2) {
+                const temp = t1;
+                t1 = t2;
+                t2 = temp;
+            }
+
+            // Compute intersection
+            if (t1 > tMin) tMin = t1;
+            if (t2 < tMax) tMax = t2;
+
+            if (tMin > tMax || tMax < 0)
+                return false;
+        }
+
+        return true;
+    }
+
+    // Perform slab check on both x and y axes
+    if (!slabCheckOnAxis(dir.x, minBoundary.x, maxBoundary.x, start.x))
+        return null;
+
+    if (!slabCheckOnAxis(dir.y, minBoundary.y, maxBoundary.y, start.y))
+        return null;
+
+    tMin = Math.min(tMin, len);
+    tMax = Math.min(tMax, len);
+
+    const startPoint = (tMin === 0) ? start : start.add(startToEnd.mult(tMin / len));
+    const endPoint = (tMax === len) ? end : start.add(startToEnd.mult(tMax / len));
+
+    return [startPoint, endPoint];
+}
 
 export default CollisionIndex;

@@ -21,7 +21,7 @@ export type CollisionUniformsType = {|
     'u_overscale_factor': Uniform1f
 |};
 
-export type CollisionUniformsTypeTemp = {|
+export type CollisionCircleUniformsType = {|
     'u_matrix': UniformMatrix4f,
     'u_invMatrix': UniformMatrix4f,
     'u_quads': Uniform4fv,
@@ -37,7 +37,7 @@ const collisionUniforms = (context: Context, locations: UniformLocations): Colli
     'u_overscale_factor': new Uniform1f(context, locations.u_overscale_factor)
 });
 
-const collisionUniformsTemp = (context: Context, locations: UniformLocations): CollisionUniformsType => ({
+const collisionCircleUniforms = (context: Context, locations: UniformLocations): CollisionCircleUniformsType => ({
     'u_matrix': new UniformMatrix4f(context, locations.u_matrix),
     'u_invMatrix': new UniformMatrix4f(context, locations.u_invMatrix),
     'u_quads': new Uniform4fv(context, locations.u_quads),
@@ -63,12 +63,12 @@ const collisionUniformValues = (
     };
 };
 
-const collisionUniformValuesTemp = (
+const collisionCircleUniformValues = (
     matrix: Float32Array,
     invMatrix: Float32Array,
     quads: Float32Array,
     transform: Transform
-): UniformValues<CollisionUniformsTypeTemp> => {
+): UniformValues<CollisionCircleUniformsType> => {
     return {
         'u_matrix': matrix,
         'u_invMatrix': invMatrix,
@@ -78,4 +78,4 @@ const collisionUniformValuesTemp = (
     };
 };
 
-export {collisionUniforms, collisionUniformValues, collisionUniformsTemp, collisionUniformValuesTemp};
+export {collisionUniforms, collisionUniformValues, collisionCircleUniforms, collisionCircleUniformValues};

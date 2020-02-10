@@ -419,6 +419,8 @@ export class Placement {
 
             if (collisionArrays.textFeatureIndex) {
                 textFeatureIndex = collisionArrays.textFeatureIndex;
+            } else if (symbolInstance.runtimeCollisionCircles) {
+                textFeatureIndex = symbolInstance.featureIndex;
             }
             if (collisionArrays.verticalTextFeatureIndex) {
                 verticalTextFeatureIndex = collisionArrays.verticalTextFeatureIndex;
@@ -565,18 +567,15 @@ export class Placement {
             placeText = placedGlyphBoxes && placedGlyphBoxes.box && placedGlyphBoxes.box.length > 0;
 
             offscreen = placedGlyphBoxes && placedGlyphBoxes.offscreen;
-            const textCircles = collisionArrays.textCircles;
-            if (textCircles) {
+
+            if (symbolInstance.runtimeCollisionCircles) {
                 const placedSymbol = bucket.text.placedSymbolArray.get(symbolInstance.centerJustifiedTextSymbolIndex);
                 const fontSize = symbolSize.evaluateSizeForFeature(bucket.textSizeData, partiallyEvaluatedTextSize, placedSymbol);
 
-                const lineHeight = bucket.layers[0].layout.get('text-line-height') * 24;
-                const textPadding = bucket.layers[0].layout.get('text-padding');
+                const textPixelPadding = layout.get('text-padding');
+                const circlePixelDiameter = symbolInstance.collisionLineHeight;
 
-                placedGlyphCircles = this.collisionIndex.placeCollisionCircles(textCircles,
-                        textAllowOverlap,
-                        scale,
-                        textPixelRatio,
+                placedGlyphCircles = this.collisionIndex.placeCollisionCircles(textAllowOverlap,
                         placedSymbol,
                         bucket.lineVertexArray,
                         bucket.glyphOffsetArray,
@@ -587,8 +586,8 @@ export class Placement {
                         showCollisionBoxes,
                         pitchWithMap,
                         collisionGroup.predicate,
-                        textPadding,
-                        lineHeight);
+                        circlePixelDiameter,
+                        textPixelPadding);
                 
                 assert(!placedGlyphCircles.circles.length || (!placedGlyphCircles.collisionDetected || showCollisionBoxes));
                 // If text-allow-overlap is set, force "placedCircles" to true
@@ -668,16 +667,16 @@ export class Placement {
                 }
             }
 
-            // Store viewport and inverse projection matrices that were used during this placement
-            mat4.invert(bucket.placementInvProjMatrix, posMatrix);
-            bucket.placementViewportMatrix = this.collisionIndex.getViewportMatrix();
-
             assert(symbolInstance.crossTileID !== 0);
             assert(bucket.bucketInstanceId !== 0);
 
             this.placements[symbolInstance.crossTileID] = new JointPlacement(placeText || alwaysShowText, placeIcon || alwaysShowIcon, offscreen || bucket.justReloaded);
             seenCrossTileIDs[symbolInstance.crossTileID] = true;
         };
+
+        // Store viewport and inverse projection matrices that were used during the latest placement iteration
+        mat4.invert(bucket.placementInvProjMatrix, posMatrix);
+        bucket.placementViewportMatrix = this.collisionIndex.getViewportMatrix();
 
         bucket.collisionCircleArrayTemp.clear();
 
@@ -828,8 +827,8 @@ export class Placement {
         if (bucket.hasIconData()) bucket.icon.opacityVertexArray.clear();
         if (bucket.hasIconCollisionBoxData()) bucket.iconCollisionBox.collisionVertexArray.clear();
         if (bucket.hasTextCollisionBoxData()) bucket.textCollisionBox.collisionVertexArray.clear();
-        if (bucket.hasIconCollisionCircleData()) bucket.iconCollisionCircle.collisionVertexArray.clear();
-        if (bucket.hasTextCollisionCircleData()) bucket.textCollisionCircle.collisionVertexArray.clear();
+        //if (bucket.hasIconCollisionCircleData()) bucket.iconCollisionCircle.collisionVertexArray.clear();
+        //if (bucket.hasTextCollisionCircleData()) bucket.textCollisionCircle.collisionVertexArray.clear();
 
         const layout = bucket.layers[0].layout;
         const duplicateOpacityState = new JointOpacityState(null, 0, false, false, true);
@@ -848,8 +847,7 @@ export class Placement {
                 iconAllowOverlap && (textAllowOverlap || !bucket.hasTextData() || layout.get('text-optional')),
                 true);
 
-        if (!bucket.collisionArrays && collisionBoxArray && ((bucket.hasIconCollisionBoxData() || bucket.hasIconCollisionCircleData() ||
-            bucket.hasTextCollisionBoxData() || bucket.hasTextCollisionCircleData()))) {
+        if (!bucket.collisionArrays && collisionBoxArray && ((bucket.hasIconCollisionBoxData() || bucket.hasTextCollisionBoxData()))) {
             bucket.deserializeCollisionBoxes(collisionBoxArray);
         }
 
@@ -947,8 +945,7 @@ export class Placement {
                 }
             }
 
-            if (bucket.hasIconCollisionBoxData() || bucket.hasIconCollisionCircleData() ||
-                bucket.hasTextCollisionBoxData() || bucket.hasTextCollisionCircleData()) {
+            if (bucket.hasIconCollisionBoxData() || bucket.hasTextCollisionBoxData()) {
                 const collisionArrays = bucket.collisionArrays[s];
                 if (collisionArrays) {
                     let shift = new Point(0, 0);
@@ -998,14 +995,6 @@ export class Placement {
                             hasIconTextFit ? shift.x : 0,
                             hasIconTextFit ? shift.y : 0);
                     }
-
-                    const textCircles = collisionArrays.textCircles;
-                    if (textCircles && bucket.hasTextCollisionCircleData()) {
-                        for (let k = 0; k < textCircles.length; k += 5) {
-                            const notUsed = isDuplicate || textCircles[k + 4] === 0;
-                            updateCollisionVertices(bucket.textCollisionCircle.collisionVertexArray, opacityState.text.placed, notUsed);
-                        }
-                    }
                 }
             }
         }
@@ -1027,12 +1016,12 @@ export class Placement {
         if (bucket.hasTextCollisionBoxData() && bucket.textCollisionBox.collisionVertexBuffer) {
             bucket.textCollisionBox.collisionVertexBuffer.updateData(bucket.textCollisionBox.collisionVertexArray);
         }
-        if (bucket.hasIconCollisionCircleData() && bucket.iconCollisionCircle.collisionVertexBuffer) {
-            bucket.iconCollisionCircle.collisionVertexBuffer.updateData(bucket.iconCollisionCircle.collisionVertexArray);
-        }
-        if (bucket.hasTextCollisionCircleData() && bucket.textCollisionCircle.collisionVertexBuffer) {
-            bucket.textCollisionCircle.collisionVertexBuffer.updateData(bucket.textCollisionCircle.collisionVertexArray);
-        }
+        // if (bucket.hasIconCollisionCircleData() && bucket.iconCollisionCircle.collisionVertexBuffer) {
+        //     bucket.iconCollisionCircle.collisionVertexBuffer.updateData(bucket.iconCollisionCircle.collisionVertexArray);
+        // }
+        // if (bucket.hasTextCollisionCircleData() && bucket.textCollisionCircle.collisionVertexBuffer) {
+        //     bucket.textCollisionCircle.collisionVertexBuffer.updateData(bucket.textCollisionCircle.collisionVertexArray);
+        // }
 
         assert(bucket.text.opacityVertexArray.length === bucket.text.layoutVertexArray.length / 4);
         assert(bucket.icon.opacityVertexArray.length === bucket.icon.layoutVertexArray.length / 4);
