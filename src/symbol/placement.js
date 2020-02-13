@@ -658,7 +658,7 @@ export class Placement {
                 }
 
                 for (let i = 0; i < placedGlyphCircles.circles.length; i+=4) {
-                    bucket.collisionCircleArrayTemp.emplaceBack(
+                    bucket.collisionCircleArray.emplaceBack(
                         placedGlyphCircles.circles[i + 0],              // x
                         placedGlyphCircles.circles[i + 1],              // y
                         placedGlyphCircles.circles[i + 2],              // radius
@@ -678,7 +678,7 @@ export class Placement {
         mat4.invert(bucket.placementInvProjMatrix, posMatrix);
         bucket.placementViewportMatrix = this.collisionIndex.getViewportMatrix();
 
-        bucket.collisionCircleArrayTemp.clear();
+        bucket.collisionCircleArray.clear();
 
         if (zOrderByViewportY) {
             assert(bucketPart.symbolInstanceStart === 0);
@@ -827,8 +827,6 @@ export class Placement {
         if (bucket.hasIconData()) bucket.icon.opacityVertexArray.clear();
         if (bucket.hasIconCollisionBoxData()) bucket.iconCollisionBox.collisionVertexArray.clear();
         if (bucket.hasTextCollisionBoxData()) bucket.textCollisionBox.collisionVertexArray.clear();
-        //if (bucket.hasIconCollisionCircleData()) bucket.iconCollisionCircle.collisionVertexArray.clear();
-        //if (bucket.hasTextCollisionCircleData()) bucket.textCollisionCircle.collisionVertexArray.clear();
 
         const layout = bucket.layers[0].layout;
         const duplicateOpacityState = new JointOpacityState(null, 0, false, false, true);

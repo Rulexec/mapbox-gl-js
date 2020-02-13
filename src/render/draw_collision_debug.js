@@ -80,7 +80,7 @@ function drawCollisionDebug(painter: Painter, sourceCache: SourceCache, layer: S
         const bucket: ?SymbolBucket = (tile.getBucket(layer): any);
         if (!bucket) continue;
 
-        const arr = bucket.collisionCircleArrayTemp;
+        const arr = bucket.collisionCircleArray;
 
         if (!arr.length)
             continue;

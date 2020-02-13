@@ -327,7 +327,7 @@ class SymbolBucket implements Bucket {
     sortedAngle: number;
     featureSortOrder: Array<number>;
 
-    collisionCircleArrayTemp: StructArrayLayout4f16;
+    collisionCircleArray: StructArrayLayout4f16;
     placementInvProjMatrix: mat4;
     placementViewportMatrix: mat4;
 
@@ -356,7 +356,7 @@ class SymbolBucket implements Bucket {
         this.hasRTLText = false;
         this.sortKeyRanges = [];
 
-        this.collisionCircleArrayTemp = new StructArrayLayout4f16();
+        this.collisionCircleArray = new StructArrayLayout4f16();
         this.placementInvProjMatrix = mat4.identity([])
         this.placementViewportMatrix = mat4.identity([]);
 

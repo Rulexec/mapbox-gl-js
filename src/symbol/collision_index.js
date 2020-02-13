@@ -216,7 +216,7 @@ class CollisionIndex {
                 const padding = Math.min(segLength * 0.5, radius * 0.5);
                 segLength -= padding * 2.0;
 
-                const circleDist = radius * 2.25;
+                const circleDist = radius * 2.5;
                 const numCircles = segLength <= circleDist * 0.5 ? 1 : Math.ceil(segLength / circleDist) + 1;
 
                 let idxOfNextSegPoint = 1;
