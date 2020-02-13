@@ -14,194 +14,188 @@ import {StructArrayLayout2i4, StructArrayLayout3ui6} from '../data/array_types'
 import {collisionCircleLayout} from '../data/bucket/symbol_attributes';
 import SegmentVector from '../data/segment';
 import { mat4 } from 'gl-matrix';
+import VertexBuffer from '../gl/vertex_buffer';
+import IndexBuffer from '../gl/index_buffer';
 
 export default drawCollisionDebug;
 
+let quadVertexBuffer: VertexBuffer;
+let quadIndexBuffer: IndexBuffer;
+
 function drawCollisionDebug(painter: Painter, sourceCache: SourceCache, layer: StyleLayer, coords: Array<OverscaledTileID>, translate: [number, number], translateAnchor: 'map' | 'viewport', isText: boolean) {
-        const context = painter.context;
-        const gl = context.gl;
-        const program = painter.useProgram('collisionBox');
-    
-        for (let i = 0; i < coords.length; i++) {
-            const coord = coords[i];
-            const tile = sourceCache.getTile(coord);
-            const bucket: ?SymbolBucket = (tile.getBucket(layer): any);
-            if (!bucket) continue;
-            const buffers = isText ? bucket.textCollisionBox : bucket.iconCollisionBox;
-            if (!buffers) continue;
-            let posMatrix = coord.posMatrix;
-            if (translate[0] !== 0 || translate[1] !== 0) {
-                posMatrix = painter.translatePosMatrix(coord.posMatrix, tile, translate, translateAnchor);
-            }
-            program.draw(context, gl.LINES,
-                DepthMode.disabled, StencilMode.disabled,
-                painter.colorModeForRenderPass(),
-                CullFaceMode.disabled,
-                collisionUniformValues(
-                    posMatrix,
-                    painter.transform,
-                    tile),
-                layer.id, buffers.layoutVertexBuffer, buffers.indexBuffer,
-                buffers.segments, null, painter.transform.zoom, null, null,
-                buffers.collisionVertexBuffer);
+    const context = painter.context;
+    const gl = context.gl;
+    const program = painter.useProgram('collisionBox');
+
+    for (let i = 0; i < coords.length; i++) {
+        const coord = coords[i];
+        const tile = sourceCache.getTile(coord);
+        const bucket: ?SymbolBucket = (tile.getBucket(layer): any);
+        if (!bucket) continue;
+        const buffers = isText ? bucket.textCollisionBox : bucket.iconCollisionBox;
+        if (!buffers) continue;
+        let posMatrix = coord.posMatrix;
+        if (translate[0] !== 0 || translate[1] !== 0) {
+            posMatrix = painter.translatePosMatrix(coord.posMatrix, tile, translate, translateAnchor);
+        }
+        program.draw(context, gl.LINES,
+            DepthMode.disabled, StencilMode.disabled,
+            painter.colorModeForRenderPass(),
+            CullFaceMode.disabled,
+            collisionUniformValues(
+                posMatrix,
+                painter.transform,
+                tile),
+            layer.id, buffers.layoutVertexBuffer, buffers.indexBuffer,
+            buffers.segments, null, painter.transform.zoom, null, null,
+            buffers.collisionVertexBuffer);
+    }
+
+    // Collision circle rendering is done by using simple shader batching scheme where dynamic properties of
+    // circles are passed to the GPU using shader uniforms. Circles are first encoded into 4-component vectors
+    // (center_x, center_y, radius, flag) and then uploaded in batches as "uniform vec4 u_quads[N]". 
+    // Vertex data is just a collection of incremental index values pointing to the quads-array.
+    // 
+    // If one quad uses 4 vertices then all required values can be deduced from the index value:
+    //   int quad_idx = int(vertex.idx / 4);
+    //   int corner_idx = int(vertex.idx % 4);
+    // 
+    // OpenGL ES 2.0 spec defines that the maximum number of supported vertex uniform vectors (vec4) should be
+    // at least 128. Choosing a safe value 64 for the quad array should leave enough space for rest of the 
+    // uniform variables.
+    const maxQuadsPerDrawCall = 64;
+
+    if (!quadVertexBuffer) {
+        quadVertexBuffer = createQuadVB(context, collisionCircleLayout, maxQuadsPerDrawCall);
+    }
+    if (!quadIndexBuffer) {
+        quadIndexBuffer = createQuadIB(context, maxQuadsPerDrawCall);
+    }
+
+    const quads = new Float32Array(maxQuadsPerDrawCall * 4);
+
+    for (let i = 0; i < coords.length; i++) {
+        const coord = coords[i];
+        const tile = sourceCache.getTile(coord);
+        const bucket: ?SymbolBucket = (tile.getBucket(layer): any);
+        if (!bucket) continue;
+
+        const arr = bucket.collisionCircleArrayTemp;
+
+        if (!arr.length)
+            continue;
+
+        let posMatrix = coord.posMatrix;
+        if (translate[0] !== 0 || translate[1] !== 0) {
+            posMatrix = painter.translatePosMatrix(coord.posMatrix, tile, translate, translateAnchor);
         }
 
-        // Render collision circles using old-school shader batching with uniform vectors.
-        const program2 = painter.useProgram('collisionCircle');
-    
-        // Spec defines the minimum size of vec4 array to be 128. If 64 is reserved (equals to 4 matrices)
-        // for matrices, then we can safely use the rest. 64 == 128 quads (4 x int16 per quad)
-        const maxQuadsPerDrawCall = 64;
-    
-        if (!('vertexBuffer2' in layer)) {
-            // Use one reusable vertex buffer that contains incremental index values.
-            const maxVerticesPerDrawCall = maxQuadsPerDrawCall * 4;
-            const array = new StructArrayLayout2i4();
-    
-            array.resize(maxVerticesPerDrawCall);
-            array._trim();
-    
-            for (let i = 0; i < maxVerticesPerDrawCall; i++) {
-                array.int16[i * 2 + 0] = i;
-                array.int16[i * 2 + 1] = i;
+        // We need to know the projection matrix that was used for projecting collision circles to the screen.
+        // This might vary between buckets as the symbol placement is a continous process. This matrix is
+        // required for transforming points from previous screen space to the current one
+        const batchInvTransform = mat4.create();
+        const batchTransform = posMatrix;
+        
+        mat4.mul(batchInvTransform, bucket.placementInvProjMatrix, painter.transform.glCoordMatrix);
+        mat4.mul(batchInvTransform, batchInvTransform, bucket.placementViewportMatrix);
+
+        let batchIdx = 0;
+        let quadOffset = 0;
+
+        while (quadOffset < arr.length) {
+            const quadsLeft = arr.length - quadOffset;
+            const quadSpaceInBatch = maxQuadsPerDrawCall - batchIdx;
+            const batchSize = Math.min(quadsLeft, quadSpaceInBatch);
+
+            // Copy collision circles from the bucket array
+            for (let qIdx = quadOffset; qIdx < quadOffset + batchSize; qIdx++) {
+                quads[batchIdx * 4 + 0] = arr.float32[qIdx * 4 + 0]; // width
+                quads[batchIdx * 4 + 1] = arr.float32[qIdx * 4 + 1]; // height
+                quads[batchIdx * 4 + 2] = arr.float32[qIdx * 4 + 2]; // radius
+                quads[batchIdx * 4 + 3] = arr.float32[qIdx * 4 + 3]; // collisionFlag
+                batchIdx++;
             }
-    
-            layer.vertexBuffer2 = context.createVertexBuffer(array, collisionCircleLayout.members, false);
-        }
-    
-        if (!('indexBuffer2' in layer)) {
-            // TODO: comment
-            const maxTrianglesPerDrawCall = maxQuadsPerDrawCall * 2;
-            const array = new StructArrayLayout3ui6();
-    
-            array.resize(maxTrianglesPerDrawCall);
-            array._trim();
-    
-            for (let i = 0; i < maxTrianglesPerDrawCall; i++) {
-                const idx = i * 6;
-    
-                array.uint16[idx + 0] = i * 4 + 0;
-                array.uint16[idx + 1] = i * 4 + 1;
-                array.uint16[idx + 2] = i * 4 + 2;
-                array.uint16[idx + 3] = i * 4 + 2;
-                array.uint16[idx + 4] = i * 4 + 3;
-                array.uint16[idx + 5] = i * 4 + 0;
-            }
-    
-            layer.indexBuffer2 = context.createIndexBuffer(array, false);
-        }
-    
-        // We need to know the projection matrix that was used for projecting collision circles to the screen
-        // This might vary between buckets as the symbol placement is a continous process. For improved rendering
-        // performance circles with same projection matrix are batched together
-    
-        // Render circle arrays grouped by projection matrices. Blue circles and collided red circles
-        // will be rendered in separate batches
-        const quadProperties = new Float32Array(maxQuadsPerDrawCall * 4);
-    
-        for (let i = 0; i < coords.length; i++) {
-            const coord = coords[i];
-            const tile = sourceCache.getTile(coord);
-            const bucket: ?SymbolBucket = (tile.getBucket(layer): any);
-            if (!bucket) continue;
-    
-            const arr = bucket.collisionCircleArrayTemp;
-    
-            if (!arr.length)
-                continue;
-    
-            let posMatrix = coord.posMatrix;
-            if (translate[0] !== 0 || translate[1] !== 0) {
-                posMatrix = painter.translatePosMatrix(coord.posMatrix, tile, translate, translateAnchor);
-            }
-    
-            // Create a transformation matrix that will transform points from screen space that was used
-            // during placement logic to the current screen space
-            const batchInvTransform = mat4.create();
-            const batchTransform = posMatrix;
-            
-            mat4.mul(batchInvTransform, bucket.placementInvProjMatrix, painter.transform.glCoordMatrix);
-            mat4.mul(batchInvTransform, batchInvTransform, bucket.placementViewportMatrix);
-    
-            let batchQuadIdx = 0;
-            let quadOffset = 0;
-    
-            while (quadOffset < arr.length) {
-                const quadsLeft = arr.length - quadOffset;
-                const quadSpaceInBatch = maxQuadsPerDrawCall - batchQuadIdx;
-                const batchSize = Math.min(quadsLeft, quadSpaceInBatch);
-    
-                // Copy collision circles from the bucket array
-                for (let qIdx = quadOffset; qIdx < quadOffset + batchSize; qIdx++) {
-                    quadProperties[batchQuadIdx * 4 + 0] = arr.float32[qIdx * 4 + 0]; // width
-                    quadProperties[batchQuadIdx * 4 + 1] = arr.float32[qIdx * 4 + 1]; // height
-                    quadProperties[batchQuadIdx * 4 + 2] = arr.float32[qIdx * 4 + 2]; // radius
-                    quadProperties[batchQuadIdx * 4 + 3] = arr.float32[qIdx * 4 + 3]; // collisionFlag
-                    batchQuadIdx++;
-                }
-    
-                quadOffset += batchSize;
-    
-                if (batchQuadIdx === maxQuadsPerDrawCall) {
-                    // TODO: only quad uniforms should be uploaded
-                    const uniforms = collisionCircleUniformValues(
-                        batchTransform,
-                        batchInvTransform,
-                        quadProperties,
-                        painter.transform);
-    
-                    // Upload quads packed in uniform vector
-                    program2.draw(
-                        context,
-                        gl.TRIANGLES,
-                        DepthMode.disabled,
-                        StencilMode.disabled,
-                        painter.colorModeForRenderPass(),
-                        CullFaceMode.disabled,
-                        uniforms,
-                        layer.id,
-                        layer.vertexBuffer2, // layoutVertexBuffer
-                        layer.indexBuffer2, // indexbuffer,
-                        SegmentVector.simpleSegment(0, 0, batchQuadIdx * 4, batchQuadIdx * 2),
-                        null,
-                        painter.transform.zoom,
-                        null,
-                        null, // vertexBuffer
-                        null  // vertexBuffer
-                    );
-    
-                    batchQuadIdx = 0;
-                }
-            }
-    
-            // Render the leftover batch
-            if (batchQuadIdx) {
-                // TODO: only quad uniforms should be uploaded
-                const uniforms = collisionCircleUniformValues(
-                    batchTransform,
-                    batchInvTransform,
-                    quadProperties,
-                    painter.transform);
-    
-                // Upload quads packed in uniform vector
-                program2.draw(
-                    context,
-                    gl.TRIANGLES,
-                    DepthMode.disabled,
-                    StencilMode.disabled,
-                    painter.colorModeForRenderPass(),
-                    CullFaceMode.disabled,
-                    uniforms,
-                    layer.id,
-                    layer.vertexBuffer2, // layoutVertexBuffer
-                    layer.indexBuffer2, // indexbuffer,
-                    SegmentVector.simpleSegment(0, 0, batchQuadIdx * 4, batchQuadIdx * 2),
-                    null,
-                    painter.transform.zoom,
-                    null,
-                    null, // vertexBuffer
-                    null  // vertexBuffer
-                );
+
+            quadOffset += batchSize;
+
+            if (batchIdx === maxQuadsPerDrawCall) {
+                drawBatch(painter, batchTransform, batchInvTransform, quads, batchIdx, layer.id, quadVertexBuffer, quadIndexBuffer);
+                batchIdx = 0;
             }
         }
+
+        // Render the leftover batch
+        if (batchIdx > 0) {
+            drawBatch(painter, batchTransform, batchInvTransform, quads, batchIdx, layer.id, quadVertexBuffer, quadIndexBuffer);
+        }
+    }
+}
+
+function drawBatch(painter: Painter, proj: mat4, invPrevProj: mat4, quads: any, numQuads: number, layerId: mumber, vb: VertexBuffer, ib: IndexBuffer) {
+    const context = painter.context;
+    const gl = context.gl;
+    const circleProgram = painter.useProgram('collisionCircle');
+
+    const uniforms = collisionCircleUniformValues(
+        proj,
+        invPrevProj,
+        quads,
+        painter.transform);
+
+    circleProgram.draw(
+        context,
+        gl.TRIANGLES,
+        DepthMode.disabled,
+        StencilMode.disabled,
+        painter.colorModeForRenderPass(),
+        CullFaceMode.disabled,
+        uniforms,
+        layerId,
+        vb,
+        ib,
+        SegmentVector.simpleSegment(0, 0, numQuads * 4, numQuads * 2),
+        null,
+        painter.transform.zoom,
+        null,
+        null,
+        null);
+}
+
+function createQuadVB(context: Context, layout: any, quadCount: number): VertexBuffer {
+    const vCount = quadCount * 4;
+    const array = new StructArrayLayout2i4();
+
+    array.resize(vCount);
+    array._trim();
+
+    // Fill the buffer with an incremental index value (2 per vertex)
+    // [0, 0, 1, 1, 2, 2, 3, 3, 4, 4...]
+    for (let i = 0; i < vCount; i++) {
+        array.int16[i * 2 + 0] = i;
+        array.int16[i * 2 + 1] = i;
+    }
+
+    return context.createVertexBuffer(array, layout.members, false);
+}
+
+function createQuadIB(context: Context, quadCount: number): IndexBuffer {
+    const triCount = quadCount * 2;
+    const array = new StructArrayLayout3ui6();
+
+    array.resize(triCount);
+    array._trim();
+
+    // Two triangles and 4 vertices per quad.
+    for (let i = 0; i < triCount; i++) {
+        const idx = i * 6;
+
+        array.uint16[idx + 0] = i * 4 + 0;
+        array.uint16[idx + 1] = i * 4 + 1;
+        array.uint16[idx + 2] = i * 4 + 2;
+        array.uint16[idx + 3] = i * 4 + 2;
+        array.uint16[idx + 4] = i * 4 + 3;
+        array.uint16[idx + 5] = i * 4 + 0;
+    }
+
+    return context.createIndexBuffer(array, false);
 }
