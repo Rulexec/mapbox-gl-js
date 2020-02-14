@@ -279,7 +279,9 @@ class Transform {
         const centerCoord = MercatorCoordinate.fromLngLat(this.center);
         const numTiles = Math.pow(2, z);
         const centerPoint = [numTiles * centerCoord.x, numTiles * centerCoord.y, 0];
-        const cameraFrustum = Frustum.fromInvProjectionMatrix(this.invProjMatrix, this.worldSize, z);
+        const matrix = mat4.clone(this.invProjMatrix);
+        mat4.scale(matrix, matrix, [1.5, 1.5, 1]);
+        const cameraFrustum = Frustum.fromInvProjectionMatrix(matrix, this.worldSize, z);
 
         // No change of LOD behavior for pitch lower than 60: return only tile ids from the requested zoom level
         let minZoom = options.minzoom || 0;
